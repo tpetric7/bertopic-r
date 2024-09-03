@@ -1,0 +1,1976 @@
+---
+title: "Topic Modeling with BERTopic in R via reticulate and ollama"
+subtitle: "Spiegel"
+author: "Teodor Petrič"
+date: "2024-08-22"
+format:
+  html:
+    theme:
+      light: flatly
+      dark: darkly
+    # css: [style.css, TMwR.css]
+    # scss: [colors.scss]
+    # scss: [r4ds.scss]
+    # page-layout: full
+    toc: true
+    toc-depth: 5
+    toc-location: right
+    code-fold: true
+    code-summary: "Show the code"
+    code-tools: true
+    code-copy: hover
+    code-overflow: wrap
+    code-link: false # set to false for plotly
+    number-sections: true
+    number-depth: 5
+    callout-appearance: default
+    callout-icon: true
+    citations-hover: true
+    footnotes-hover: true
+    fig-width: 8
+    fig-height: 6
+    fig-align: left
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    lang: en
+    self-contained: true
+    anchor-sections: true
+    smooth-scroll: true
+    hypothesis: true
+  pdf:
+    documentclass: scrreprt # scrbook
+    keep-tex: true
+    include-in-header: 
+      text: |
+        \usepackage{makeidx}
+        \makeindex
+    include-after-body: 
+      text: |
+        \printindex
+  epub:
+    cover-image: "pictures/R_delavnica_naslovna_slika.png"
+  docx:
+    reference-doc: custom-reference.docx
+
+editor: source
+---
+
+The programming steps of this tutorial were supported by the programming skills of `OpenAI`'s language model `GPT4o`. 
+
+
+## Env & Packages
+
+*Load* the `R` packages below and *initialize* a `Python` environment with the `reticulate` package.
+
+By default, `reticulate` uses an isolated `Python` *virtual environment* named `r-reticulate` (cf. https://rstudio.github.io/reticulate/).
+
+The `use_python()` function below enables you to specify an alternate `Python` (cf. https://rstudio.github.io/reticulate/).
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(quanteda)
+library(tictoc)
+library(htmltools)
+library(htmlwidgets)
+library(arrow)
+
+library(reticulate)
+use_python("c:/Users/teodo/anaconda3/envs/bertopic", required = TRUE)
+reticulate::py_config()
+reticulate::py_available()
+
+library(bertopicr)
+```
+
+
+## Text preparation
+
+You need the `arrow` package to open the `parquet` file below. 
+
+The German texts are in the *text_clean* column. They were segmented into smaller chunks (each about 100 tokens long) to optimize topic extraction with `Bertopic`. Special characters were removed with a cleaning function. The text chunks are all in lower case. 
+
+```{r}
+# input_file <- "spiegel_poldeu2.csv"
+input_file <- "data/spiegel_comments_column_selection.parquet"
+dataset <- read_parquet(input_file)
+names(df)
+dim(df)
+```
+
+The collected `stopword` list includes German and English tokens and will be inserted into `Python`'s `CountVectorizer` before `TF-IDF` calculation. The language model will be fed with the text chunks in the *text_clean* column before the `stopword` removal.
+
+```{r}
+input_file <- "stopwords/all_stopwords.txt"
+all_stopwords <- read_lines(input_file)
+```
+
+Below are the lists of *texts_cleaned* and *timesteps*, which we need during the model preparation, topic extraction and visualization.
+
+```{r}
+texts_cleaned = dataset$text_clean
+titles = dataset$doc_id
+timestamps <- as.list(dataset$date)
+# timestamps <- as.integer(dataset$year)
+
+texts_cleaned[[1]]
+```
+
+
+## Model Preparation
+
+Below are two sections that allow to choose between topic model preparation with *local* language models (via `ollama` or `lm-studio`) or with *online* language models hosted by `Groq`.
+
+In both cases the `OpenAI` endpoint is used to connect the languages models.
+
+By default, local models are enabled in this section with the `yaml` setting to *true*). You can change that: Set the `yaml` option `eval` in the `r` program chunk to *false* or *true* as needed.
+
+### Local models
+
+Before running the program chunk below, make sure to *install* all the necessary `Python` packages: `bertopic, numpy, scikit-learn, sentence-transformers, umap-learn, hdbscan, spacy, openai` and `datetime`. Download and install `ollama` or `lm-studio` to serve the *local* language model. 
+
+In `RStudio`, you can accomplish this with `reticulate` commands: e.g., `reticulate::py_install ("bertopic", envname = "CHOOSE THE PATH YOUR PYTHON ENVIRONMENT")`. 
+
+If you are familiar working with a (windows or conda) `terminal`, you can activate the appropriate `Python` or `Conda` environment and install the necessary packages: e.g., `pip install bertopic`).
+
+First, we `import` the necessary `Python` packages: `numpy, umap, hdbscan, scikit-learn, sentence_transformers, and bertopic`.
+
+`SentenceTransformer` creates the necessary *embeddings* for topic modeling with `bertopic`. The first time `SentenceTransformer` is used with a specific model, the model has to been downloaded from the `huggingface` website (https://huggingface.co/), where many freely usable language models are hosted (https://huggingface.co/models). 
+
+In the next two steps, the `umap` module reduces the number of dimensions of embeddings, and the `hdbscan` module extracts clusters that can evaluated by the topic pipeline.
+
+The `Countvectorizer` calculates the `c-TF-IDF` frequencies and enables the representation model defined below to extract suitable keywords as descriptors of the extracted topics.
+
+In the example below, *multiple representation models* are used for keyword extraction from the identified topics and topic description: `keyBERT` (part of `bertopic`), a language model (served locally by `ollama` or online by `Groq`, both via the `OpenAI` endpoint), a Maximal Marginal Relevance model (`MMR`) and a `spacy` `POS` representation model. By default, only one Representation model is created by `bertopic`.
+
+The *prompt* describes the task the language model has to accomplish, mentions the documents to work with and the topic labels that it should derive from the text contents and keywords.
+
+`Bertopic` enables us to define a `zeroshot` list of keywords that can be used to drive the topic model towards desired topic outcomes. In the code below, the zeroshot keyword search is disabled, but can be activated if needed.
+
+After all these preparational steps, the topic model is trained with:  `topic_model$fit_transform(texts, embeddings)`.
+
+We obtain the *topic labels* with `topics <- fit_transform[[1]]` and the *topic probabilities* with `probs <- fit_transform[[2]]`.
+
+The *topic labels* and *probabilities* are stored in a dataframe named *results*, together with other variables and metadata.
+
+Since our dataset contains time-related metadata, we can use the `timestamps` for `dynamic topic modeling`, i.e., for discovering topic development or topic sequences through time. If your data doesn't contain any time-related column, the timestamps and topics_over_time calculations have to be disabled.
+
+The `custom fit_transform_with_retry()` function usually is not necessary with local language models, but can be very helpful with online models served by Groq or other providers to avoid error messages due to rate limits or other workflow disturbancies.
+
+```{r}
+#| eval: true
+
+# Import necessary Python modules
+np <- import("numpy")
+umap <- import("umap")
+UMAP <- umap$UMAP
+hdbscan <- import("hdbscan")
+HDBSCAN <- hdbscan$HDBSCAN
+sklearn <- import("sklearn")
+CountVectorizer <- sklearn$feature_extraction$text$CountVectorizer
+bertopic <- import("bertopic")
+
+# Embed the sentences
+py <- import_builtins()
+sentence_transformers <- import("sentence_transformers")
+SentenceTransformer <- sentence_transformers$SentenceTransformer
+embedding_model = SentenceTransformer("BAAI/bge-m3")
+embeddings = embedding_model$encode(texts_cleaned, show_progress_bar=TRUE)
+
+# Initialize UMAP and HDBSCAN models
+umap_model <- UMAP(n_neighbors=15L, n_components=5L, min_dist=0.0, metric='cosine', random_state=42L)
+hdbscan_model <- HDBSCAN(min_cluster_size=50L, min_samples = 20L, metric='euclidean', cluster_selection_method='eom', gen_min_span_tree=TRUE, prediction_data=TRUE)
+
+# Initialize CountVectorizer
+vectorizer_model <- CountVectorizer(min_df=2L, ngram_range=tuple(1L, 3L), 
+                                    max_features = 10000L, max_df = 50L,
+                                    stop_words = all_stopwords)
+sentence_vectors <- vectorizer_model$fit_transform(texts_cleaned)
+sentence_vectors_dense <- np$array(sentence_vectors)
+sentence_vectors_dense <- py_to_r(sentence_vectors_dense)
+
+# Initialize representation models
+keybert_model <- bertopic$representation$KeyBERTInspired()
+openai <- import("openai")
+OpenAI <- openai$OpenAI
+ollama <- import("ollama")
+
+# Point to the local server (ollama or lm-studio)
+client <- OpenAI(base_url = 'http://localhost:11434/v1', api_key='ollama')
+# client <- OpenAI(base_url = 'http://localhost:1234/v1', api_key='lm-studio')
+
+prompt <- "
+I have a topic that contains the following documents:
+[DOCUMENTS]
+The topic is described by the following keywords: [KEYWORDS]
+
+Based on the information above, extract a short but highly descriptive topic label of at most 5 words. Make sure it is in the following format:
+topic: <topic label>
+"
+
+# download an appropriate local LLM for your computer with ollama/lm-studio
+openai_model <- bertopic$representation$OpenAI(client, 
+                                               model = "llama3.1:8b-instruct-fp16",
+                                               exponential_backoff = TRUE, 
+                                               chat = TRUE, 
+                                               prompt = prompt)
+
+# downlaod a spacy language model from spacy.io
+pos_model <- bertopic$representation$PartOfSpeech("de_core_news_lg")
+# diversity set relatively high to reduce repetition of keyword word forms
+mmr_model <- bertopic$representation$MaximalMarginalRelevance(diversity = 0.5)
+
+# Combine all representation models
+representation_model <- list(
+  "KeyBERT" = keybert_model,
+  "OpenAI" = openai_model,
+  "MMR" = mmr_model,
+  "POS" = pos_model
+)
+
+# We define a number of topics that we know are in the documents
+zeroshot_topic_list  <- list("german national identity", "minority issues in germany")
+
+# Initialize BERTopic model with pipeline models and hyperparameters
+BERTopic <- bertopic$BERTopic
+topic_model <- BERTopic(
+  embedding_model = embedding_model,
+  umap_model = umap_model,
+  hdbscan_model = hdbscan_model,
+  vectorizer_model = vectorizer_model,
+  # zeroshot_topic_list = zeroshot_topic_list,
+  # zeroshot_min_similarity = 0.85,
+  representation_model = representation_model,
+  calculate_probabilities = TRUE,
+  top_n_words = 10L,
+  verbose = TRUE
+)
+
+tictoc::tic()
+
+# Fit the model and transform the texts
+fit_transform <- topic_model$fit_transform(texts_cleaned, embeddings)
+topics <- fit_transform[[1]]
+# probs <- fit_transform[[2]]
+
+# Now transform the texts to get the updated probabilities
+transform_result <- topic_model$transform(texts_cleaned)
+probs <- transform_result[[2]]  # Extract the updated probabilities
+
+tictoc::toc()
+
+
+# Converting R Date to Python datetime
+datetime <- import("datetime")
+
+timestamps <- as.list(dataset$date)
+# timestamps <- as.integer(dataset$year)
+
+# Convert each R date object to an ISO 8601 string
+timestamps <- lapply(timestamps, function(x) {
+  format(x, "%Y-%m-%dT%H:%M:%S")  # ISO 8601 format
+})
+
+# Dynamic topic model
+topics_over_time  <- topic_model$topics_over_time(texts_cleaned, timestamps, nr_bins=20L, global_tuning=TRUE, evolution_tuning=TRUE)
+
+
+# Combine results with additional columns
+results <- dataset |> 
+  mutate(Topic = topics, 
+         Probability = apply(probs, 1, max))  # Assuming the highest probability for each sentence
+
+results <- results |> 
+  mutate(row_id = row_number()) |> 
+  select(row_id, everything())
+
+head(results,100) |> rmarkdown::paged_table()
+
+# results |>
+#   saveRDS("data/spiegel_kommentare_topic_results_df_02.rds")
+# results |>
+#   write_csv("data/spiegel_kommentare_topic_results_df_02.csv")
+# results |>
+#   writexl::write_xlsx("data/spiegel_kommentare_topic_results_df_02.xlsx")
+
+```
+
+
+### Groq models
+
+The model preparation chunk with online models hosted by `Groq` is disabled. Enable if needed (set `eval` to *true*). 
+
+The `custom fit_transform_with_retry()` function usually is not necessary with local language models, but can be very helpful with online models served by Groq or other providers to avoid error messages due to *rate limits* or other workflow disturbancies.
+
+```{r}
+#| eval: false
+
+# Import necessary Python modules
+np <- import("numpy")
+umap <- import("umap")
+UMAP <- umap$UMAP
+
+hdbscan <- import("hdbscan")
+HDBSCAN <- hdbscan$HDBSCAN
+
+sklearn <- import("sklearn")
+CountVectorizer <- sklearn$feature_extraction$text$CountVectorizer
+
+bertopic <- import("bertopic")
+
+# Embed the sentences
+py <- import_builtins()
+sentence_transformers <- import("sentence_transformers")
+SentenceTransformer <- sentence_transformers$SentenceTransformer
+embedding_model = SentenceTransformer("BAAI/bge-m3")
+embeddings = embedding_model$encode(texts_cleaned, show_progress_bar=TRUE)
+
+# Initialize UMAP and HDBSCAN models
+umap_model <- UMAP(n_neighbors=15L, n_components=5L, min_dist=0.0, metric='cosine', random_state=42L)
+hdbscan_model <- HDBSCAN(min_cluster_size=50L, min_samples = 20L, metric='euclidean', cluster_selection_method='eom', gen_min_span_tree=TRUE, prediction_data=TRUE)
+
+# Initialize CountVectorizer
+vectorizer_model <- CountVectorizer(min_df=2L, ngram_range=tuple(1L, 3L), 
+                                    max_features = 10000L, max_df = 50L,
+                                    stop_words = all_stopwords)
+sentence_vectors <- vectorizer_model$fit_transform(texts_cleaned)
+sentence_vectors_dense <- np$array(sentence_vectors)
+sentence_vectors_dense <- py_to_r(sentence_vectors_dense)
+
+# Initialize representation models
+keybert_model <- bertopic$representation$KeyBERTInspired()
+openai <- import("openai")
+OpenAI <- openai$OpenAI
+
+os <- import("os")
+groq <- import("groq")
+dotenv <- import("dotenv")
+load_dotenv <- dotenv$load_dotenv
+dotenv_path <- '.env'
+load_dotenv(dotenv_path)
+
+# groq_api_key <- os$environ['GROQ_API_KEY']
+# client <- groq$Groq(api_key=groq_api_key)
+
+client = OpenAI(
+  base_url="https://api.groq.com/openai/v1",
+  api_key=os$environ$get("GROQ_API_KEY")
+  )
+
+prompt <- "
+I have a topic that contains the following documents:
+[DOCUMENTS]
+The topic is described by the following keywords: [KEYWORDS]
+
+Based on the information above, extract a short but highly descriptive topic label of at most 5 words. Make sure it is in the following format:
+topic: <topic label>
+"
+
+openai_model <- bertopic$representation$OpenAI(client, 
+                                               # model = "llama3-70b-8192", 
+                                               # model = "mixtral-8x7b-32768"
+                                               model = "llama-3.1-70b-versatile",
+                                               exponential_backoff = TRUE, 
+                                               chat = TRUE, 
+                                               prompt = prompt)
+
+pos_model <- bertopic$representation$PartOfSpeech("de_core_news_lg")
+mmr_model <- bertopic$representation$MaximalMarginalRelevance(diversity = 0.5)
+
+# Combine all representation models
+representation_model <- list(
+  "KeyBERT" = keybert_model,
+  "OpenAI" = openai_model,
+  "MMR" = mmr_model,
+  "POS" = pos_model
+)
+
+# We define a number of topics that we know are in the documents
+zeroshot_topic_list  <- list("german national identity", "minority issues in germany")
+
+# Initialize BERTopic model with pipeline models and hyperparameters
+BERTopic <- bertopic$BERTopic
+topic_model <- BERTopic(
+  embedding_model = embedding_model,
+  umap_model = umap_model,
+  hdbscan_model = hdbscan_model,
+  vectorizer_model = vectorizer_model,
+  # zeroshot_topic_list = zeroshot_topic_list,
+  # zeroshot_min_similarity = 0.85,
+  representation_model = representation_model,
+  calculate_probabilities = TRUE,
+  top_n_words = 10L,
+  verbose = TRUE
+)
+
+tictoc::tic()
+
+# Define a function to fit the model and transform texts with error handling
+fit_transform_with_retry <- function(topic_model, texts, embeddings, max_retries = 5, wait_time = 60) {
+  attempt <- 1
+  success <- FALSE
+  result <- NULL
+  
+  while (!success && attempt <= max_retries) {
+    tryCatch(
+      {
+        # Attempt to fit the model and transform texts
+        fit_transform <- topic_model$fit_transform(texts, embeddings)
+        success <- TRUE  # Mark success if no error occurs
+        result <- fit_transform
+      },
+      error = function(e) {
+        message("Error occurred: ", conditionMessage(e))
+        if (attempt < max_retries) {
+          message("Retrying in ", wait_time, " seconds... (Attempt ", attempt, " of ", max_retries, ")")
+          Sys.sleep(wait_time)  # Wait before retrying
+          attempt <<- attempt + 1  # Increment attempt counter
+        } else {
+          stop("Max retries reached. Unable to complete request.")
+        }
+      }
+    )
+    
+    if (success) {
+      break  # Exit the loop if the operation is successful
+    }
+  }
+  
+  return(result)
+}
+
+# Use the function to fit the model and transform the texts
+fit_transform <- fit_transform_with_retry(topic_model, texts_cleaned, embeddings)
+topics <- fit_transform[[1]]
+# Now transform the texts to get the updated probabilities
+transform_result <- topic_model$transform(texts_cleaned)
+probs <- transform_result[[2]]  # Extract the updated probabilities
+
+tictoc::toc()
+
+
+# Converting R Date to Python datetime
+datetime <- import("datetime")
+
+timestamps <- as.list(dataset$date)
+# timestamps <- as.integer(dataset$year)
+
+# Convert each R date object to an ISO 8601 string
+timestamps <- lapply(timestamps, function(x) {
+  format(x, "%Y-%m-%dT%H:%M:%S")  # ISO 8601 format
+})
+
+# Dynamic topic model
+topics_over_time  <- topic_model$topics_over_time(texts_cleaned, timestamps, nr_bins=20L, global_tuning=TRUE, evolution_tuning=TRUE)
+
+
+# Combine results with additional columns
+results <- dataset |> 
+  mutate(Topic = topics, 
+         Probability = apply(probs, 1, max))  # Assuming the highest probability for each sentence
+
+results <- results |> 
+  mutate(row_id = row_number()) |> 
+  select(row_id, everything())
+
+head(results,100)
+
+# results |>
+#   saveRDS("data/spiegel_kommentare_topic_results_df_01.rds")
+# results |>
+#   write_csv("data/spiegel_kommentare_topic_results_df_01.csv")
+# results |>
+#   writexl::write_xlsx("data/spiegel_kommentare_topic_results_df_01.xlsx")
+
+```
+
+
+## Check topics
+
+```{r}
+# # Convert topic information to R data frame
+# topic_info_df <- py_to_r(topic_info)
+
+# Get topic information
+topic_info_df <- topic_model$get_topic_info()
+
+# topic_info_df |> head()
+
+# # Check the structure of topic_info_df
+# str(topic_info_df)
+
+# number of topics (-1 included)
+print(paste("Number of topics: ", length(topic_info_df$Topic)))
+```
+
+```{r}
+topic_model$get_topic_freq()
+```
+
+Semantic search for topics.
+
+```{r}
+query <- "einwanderung"
+similar_topics <- topic_model$find_topics(keyw, top_n=10L)
+
+similar_topics[[1]]
+unlist(similar_topics[[2]])
+
+similar_topics_df <- data.frame(
+  keyword = query,
+  topics = similar_topics[[1]],
+  similarity = unlist(similar_topics[[2]])
+)
+
+similar_topics_df
+```
+
+An example of topic 76 about "zuwanderung". 
+
+```{r}
+topic_model$get_topic_info(76)
+```
+
+
+```{r}
+queries <- c("national minority", "minority issues", "nationality issues")
+search_results <- lapply(queries, function(query) topic_model$find_topics(query))
+
+# Accessing the results
+search_results[[1]][[1]]  # Topics for "national minority"
+search_results[[2]][[1]]  # Topics for "minority issues"
+search_results[[3]][[1]]  # Topics for "nationality issues"
+
+```
+
+
+```{r}
+unlist(topic_model$topic_representations_[[1]][[1]])
+unlist(topic_model$topic_representations_[[2]][[1]])
+```
+
+
+```{r}
+unlist(topic_model$topic_aspects_[[1]][[1]])
+```
+
+
+```{r}
+unlist(topic_model$get_topic(4))
+```
+
+
+The following code does not unnest all words. That's why it is disabled.
+
+```{r}
+#| eval: false
+
+# Get topic information
+topic_info_df <- topic_model$get_topic_info()
+# topic_info_df |> head()
+
+# # Convert topic information to R data frame
+# topic_info_df <- py_to_r(topic_info)
+
+# # Check the structure of topic_info_df
+# str(topic_info_df)
+
+# Unnest the columns if necessary
+unnested_topic_info_df <- topic_info_df %>%
+  unnest(cols = Representation, keep_empty = TRUE) |> 
+  unnest(cols = KeyBERT, keep_empty = TRUE) |>
+  unnest(cols = OpenAI, keep_empty = TRUE) |>
+  unnest(cols = MMR, keep_empty = TRUE) |>
+  unnest(cols = POS, keep_empty = TRUE) |>
+  unnest(cols = Representative_Docs, keep_empty = TRUE) |> 
+  distinct()
+
+# unnested_topic_info_df <- topic_info_df |> 
+#   unnest(cols = c(Representation, KeyBERT, OpenAI, MMR, POS, Representative_Docs), 
+#          keep_empty = FALSE)
+
+# Print the unnested topic information data frame
+unnested_topic_info_df |> 
+  # filter(Topic == 0) |>
+  distinct(Name, .keep_all = TRUE) |> 
+  head(10)
+
+# unnested_topic_info_df |>
+#   distinct(Name, .keep_all = TRUE) |>
+#   saveRDS("data/spiegel_kommentare_topics_01.rds")
+# unnested_topic_info_df |>
+#   distinct(Name, .keep_all = TRUE) |>
+#   write_csv("data/spiegel_kommentare_topics_01.csv") |>
+#   writexl::write_xlsx("data/spiegel_kommentare_topics_01.xlsx")
+
+```
+
+
+The following code unnests all words.
+
+```{r}
+# Get topic information
+topic_info_df <- topic_model$get_topic_info()
+
+# Create the dataframe with unnested columns
+unnested_topic_info_df1 <- topic_info_df %>%
+  unnest_wider(Representation, names_sep = "_") |> 
+  unnest_wider(KeyBERT, names_sep = "_") |>
+  unnest_wider(OpenAI, names_sep = "_") |>
+  unnest_wider(MMR, names_sep = "_") |>
+  unnest_wider(POS, names_sep = "_") |>
+  unnest_wider(Representative_Docs, names_sep = "_")
+
+# Replace NA with an empty string across all columns
+unnested_topic_info_df1[is.na(unnested_topic_info_df1)] <- ""
+
+# Unite columns that start with the same prefix
+unnested_topic_info_df <- unnested_topic_info_df1 %>%
+  rowwise() %>%  # Process row by row to handle NA and varying lengths
+  mutate(Representation = paste(c_across(starts_with("Representation_")), collapse = ", "),
+         KeyBERT = paste(c_across(starts_with("KeyBERT_")), collapse = ", "),
+         OpenAI = paste(c_across(starts_with("OpenAI_")), collapse = ", "),
+         MMR = paste(c_across(starts_with("MMR_")), collapse = ", "),
+         POS = paste(c_across(starts_with("POS_")), collapse = ", "),
+         Representative_Docs = paste(c_across(starts_with("Representative_Docs_")), collapse = ", ")) %>%
+  ungroup()  # Un-group the rows after processing
+
+# Drop the old columns (optional)
+unnested_topic_info_df <- unnested_topic_info_df %>%
+  select(-starts_with("Representation_"),
+         -starts_with("KeyBERT_"),
+         -starts_with("OpenAI_"),
+         -starts_with("MMR_"),
+         -starts_with("POS_"),
+         -starts_with("Representative_Docs_"))
+
+# # Check the final dataframe
+# str(unnested_topic_info_df)
+
+# Print the unnested topic information data frame
+unnested_topic_info_df |> 
+  # filter(Topic == 0) |>
+  distinct(Name, .keep_all = TRUE) |> 
+  head(10)
+
+# unnested_topic_info_df |>
+#   distinct(Name, .keep_all = TRUE) |>
+#   saveRDS("data/spiegel_kommentare_topics_01.rds")
+# unnested_topic_info_df |>
+#   distinct(Name, .keep_all = TRUE) |>
+#   write_csv("data/spiegel_kommentare_topics_01.csv") |>
+#   writexl::write_xlsx("data/spiegel_kommentare_topics_01.xlsx")
+
+```
+
+```{r}
+#| eval: false
+
+unnested_topic_info_df |> 
+  # filter(Topic == 0) |>
+  distinct(Name, .keep_all = TRUE) |> 
+  rmarkdown::paged_table()
+```
+
+
+
+```{r}
+results_extended <- results |> 
+  left_join(unnested_topic_info_df |> distinct(Name, .keep_all = TRUE))
+head(results_extended)
+
+# results_extended |>
+#   distinct(Name, .keep_all = TRUE) |>
+#   saveRDS("data/spiegel_kommentare_topics_01_extended.rds")
+# results_extended |>
+#   distinct(Name, .keep_all = TRUE) |>
+#   write_csv("data/spiegel_kommentare_topics_01_extended.csv") |>
+#   writexl::write_xlsx("data/spiegel_kommentare_topics_01_extended.xlsx")
+```
+
+
+Are there duplicates in the dataframe?
+
+```{r}
+# Check for duplicates in the results_extended dataframe
+duplicates <- results_extended[duplicated(results_extended), ]
+
+# Print out duplicates if any
+if (nrow(duplicates) > 0) {
+  print("Duplicates found:")
+  print(duplicates)
+} else {
+  print("No duplicates found.")
+}
+
+library(dplyr)
+
+# Find duplicates using tidyverse
+duplicates <- results_extended %>% 
+  group_by(Topic, text_clean) %>% 
+  filter(n() > 1)
+
+# Print out duplicates if any
+if (nrow(duplicates) > 0) {
+  print("Duplicates found:")
+  print(duplicates)
+} else {
+  print("No duplicates found.")
+}
+
+```
+
+
+Show a custom number of representative documents of a certain topic.
+
+```{r}
+# Create a data frame
+df_docs <- tibble(Topic = results_extended$Topic,
+                  Document = results_extended$text_clean,
+                  probs = results_extended$Probability)
+
+# Define the function to get representative documents
+get_representative_docs <- function(df, topic_nr, n_docs) {
+  # Filter the data frame to include only the specified topic
+  df_filtered <- df %>%
+    filter(Topic == topic_nr)
+  
+  # Randomly sample n_docs from the filtered data frame
+  df_sampled <- df_filtered %>%
+    sample_n(min(n_docs, nrow(df_filtered))) # Ensure not to sample more than available
+
+  # Return the list of sampled documents
+  return(df_sampled$Document)
+}
+
+# Example usage of the function
+sampled_docs <- get_representative_docs(df_docs, topic_nr = 1, n_docs = 5)
+unique(sampled_docs)
+
+```
+
+
+Custom function for the most representative documents of a topic.
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tibble)
+
+# Create a data frame similar to df_docs
+df_docs <- tibble(Topic = results_extended$Topic,
+                  Document = results_extended$text_clean,
+                  probs = results_extended$Probability)
+
+# Define the function to get the most representative documents
+get_most_representative_docs <- function(df, topic_nr, n_docs = 5) {
+  # Filter the data frame to include only the specified topic
+  df_filtered <- df %>%
+    filter(Topic == topic_nr)
+  
+  # Extract the probability scores for the specified topic
+  topic_probs <- df_filtered$probs
+  
+  # Order the documents by their relevance to the topic, descending
+  top_idx <- order(topic_probs, decreasing = TRUE)
+  
+  # Select the top n_docs most representative documents
+  top_docs <- df_filtered$Document[top_idx[1:n_docs]]
+  
+  # Return the list of top representative documents
+  return(top_docs)
+}
+
+# Example usage of the function
+sampled_representative_docs <- get_most_representative_docs(df_docs, topic_nr = 1, 5)
+print(sampled_representative_docs)
+
+```
+
+Or a function in tidyverse fashion.
+
+```{r}
+# results_extended |>
+#   filter(Topic == 1) |>
+#   arrange(-Probability) |>
+#   head(5) |>
+#   select(text_clean) |> 
+#   pull(text_clean)
+
+get_most_representative_docs_tidy <- function(tbl, topic_nr, n_docs=5){
+  tbl |> 
+    filter(Topic == topic_nr) |> 
+    arrange(-Probability) |> 
+    select(text_clean) |> 
+    slice_head(n = n_docs) |> 
+    pull(text_clean) |> 
+    unique()
+}
+
+sampled_representative_docs <- get_most_representative_docs_tidy(results_extended, 1, 5)
+print(sampled_representative_docs)
+```
+
+
+```{r}
+library(dplyr)
+
+# Define the function to get the most representative documents with debugging
+get_most_representative_docs_tidy <- function(tbl, topic_nr, n_docs = 5) {
+  # Filter by the specified topic
+  tbl_filtered <- tbl %>% filter(Topic == topic_nr)
+  
+  # Print out the filtered table for debugging
+  print("Filtered Table:")
+  print(tbl_filtered)
+  
+  # Sort by probability in descending order and remove duplicates
+  tbl_sorted <- tbl_filtered %>%
+    arrange(desc(Probability)) %>%
+    distinct(text_clean, .keep_all = TRUE)
+  
+  # Print out the sorted table for debugging
+  print("Sorted Table:")
+  print(tbl_sorted)
+  
+  # Select the top n_docs documents
+  top_docs <- tbl_sorted %>% head(n_docs) %>% pull(text_clean)
+  
+  # Return the list of top representative documents
+  return(top_docs)
+}
+
+# Example usage of the function
+# Assuming results_extended is a tibble with 'Topic', 'text_clean', and 'Probability' columns
+sampled_representative_docs_tidy <- get_most_representative_docs_tidy(results_extended, 1, 5)
+print(sampled_representative_docs_tidy)
+
+```
+
+
+
+## Words in Topics
+
+Choose a sentence to display.
+
+```{r}
+# which(results$Environmental_Phrases != "")
+results$Text[100]
+topics[100]
+probs[100]
+results[100,]
+```
+
+Obtain the topic_list of the document (sentence), use the conversion function to obtain a dataframe to display words with high probability for the chosen topic. 
+
+```{r}
+# Get the topic list for a specific topic number
+# For example, get the topic list for topic number 1
+topic_number <- 1
+topic_list <- topic_model$get_topic(topic_number)
+# topic_list <- merged_model$get_topic(topic_number)
+
+# Example of getting a specific topic and converting it
+# Define the function with explicit character conversion
+convert_topic_list_to_df <- function(topic_list) {
+  words <- map_chr(topic_list, ~ as.character(.[[1]]))
+  scores <- map_dbl(topic_list, ~ .[[2]])
+  data.frame(Word = words, Score = scores)
+}
+
+# Convert the topic list to a DataFrame
+topic_df <- convert_topic_list_to_df(topic_list)
+topic_df
+```
+
+Ten most probable words per topic in a dataframe:
+
+```{r}
+# Ensure `topic_df` is initialized as a data frame
+topics_df <- data.frame()
+
+# Get unique topics and sort them
+topics_unique <- unique(topics)
+topics_unique <- sort(topics_unique)
+# topics_unique <- topics_unique[topics_unique != -1]
+
+# Loop over each unique topic, skipping -1
+for (i in seq_along(topics_unique)) {
+  topic_number <- topics_unique[i]  # Get the current topic number
+  # Skip the -1 topic
+  if (topic_number == -1) {
+    next
+  }
+  topic_list <- topic_model$get_topic(topic_number)  # Retrieve the topic list
+  if (length(topic_list) > 0) {  # Check if the topic list is not empty
+    df <- convert_topic_list_to_df(topic_list)  # Convert to a DataFrame
+    df$Topic <- topic_number  # Add the topic number to the DataFrame
+    topics_df <- rbind(topics_df, df)  # Append to the main DataFrame
+  }
+}
+
+# Display the resulting DataFrame
+topics_df |> rmarkdown::paged_table()
+
+```
+
+Ten most probable words per topic in a dataframe (with bertopic dictionary):
+
+```{r}
+# Get the topics dictionary
+topics_dict <- topic_model$get_topics()
+
+# Initialize an empty DataFrame
+topics_df <- data.frame()
+
+# Loop through the topics dictionary and convert each topic to a DataFrame
+for (topic_number in names(topics_dict)) {
+  topic_list <- topics_dict[[topic_number]]
+  if (length(topic_list) > 0) {
+    df <- convert_topic_list_to_df(topic_list)
+    df$Topic <- as.numeric(topic_number)
+    topics_df <- rbind(topics_df, df)
+  }
+}
+
+# Display the resulting DataFrame
+topics_df |> rmarkdown::paged_table()
+
+```
+
+## Document-topic probabilities
+
+A *gamma matrix* in R `library(stm)` with document-topic probabilities:
+
+```{r}
+# # Transform the texts to get the topic probabilities
+# fit_transform <- topic_model$transform(texts_cleaned)
+# topics <- fit_transform[[1]]
+# probs <- fit_transform[[2]]
+
+# Assuming 'document_names' are the row names of your original document matrix
+# document_names <- rownames(dataset)
+document_names <- results$row_id
+# document_names <- results$Doc_ID
+
+# Convert the probabilities to a DataFrame
+probs_df <- as.data.frame(probs)
+colnames(probs_df) <- paste0("Topic_", 1:ncol(probs_df))
+probs_df$Document <- document_names
+
+# Convert the DataFrame to a tidy format
+tidy_probs_df <- probs_df %>%
+  pivot_longer(
+    cols = starts_with("Topic_"),
+    names_to = "topic",
+    values_to = "probability"
+  ) %>%
+  mutate(topic = as.integer(gsub("Topic_", "", topic))) |> 
+  # synchronize with Python
+  mutate(topic = topic-1)
+
+# View the tidy DataFrame
+head(tidy_probs_df)
+
+tidy_probs_df <- tidy_probs_df |> 
+  mutate(row_id = Document)
+
+gamma_enriched_df <- tidy_probs_df |> 
+  full_join(results, join_by(row_id)) |> 
+  rename(Topic_max = Topic, 
+         Prob_max = Probability,
+         Topic = topic,
+         Probability = probability) |> 
+  select(Document, row_id, Topic, Probability, Topic_max, Prob_max, everything())
+
+# View the tidy DataFrame
+head(gamma_enriched_df)
+
+# saveRDS(gamma_enriched_df, "data/pp_gamma_enriched_df.rds")
+# write_csv(gamma_enriched_df, "data/pp_gamma_enriched_df.csv")
+# # writexl::write_xlsx(gamma_enriched_df, "data/pp_gamma_enriched_df.xlsx")
+```
+
+
+```{r}
+tidy_probs_df |> 
+  filter(Document == "20") |> 
+  arrange(-probability)
+```
+
+```{r}
+gamma_enriched_df |> 
+  filter(Document == "20") |> 
+  arrange(-Probability)
+```
+
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| warning: false
+
+# Probability = gamma
+p01 <- gamma_enriched_df |> 
+  # filter(Topic != 0) |> 
+  mutate(Topic = factor(Topic)) |> 
+  group_by(genre) |> 
+  # normalize probabilities
+  mutate(Probability = Probability / sum(Probability)) %>%
+  group_by(genre, Topic) |> 
+  # summarise(Probability = max(Probability)) |> 
+  ggplot(aes(Probability, Topic, fill = Topic)) +
+  # geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  geom_col(alpha = 0.7) +
+  facet_wrap(~ genre) +
+  labs(x = expression(Probability),
+       title = "Topic Probabilities by genre") +
+  theme(legend.position = "none")
+p01
+# ggsave("pics/topics_unos_by_subject.png", dpi = 300, width = 10, height = 10)
+
+# library(plotly)
+# ggplotly(p01)
+```
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 12
+#| warning: false
+
+# Probability = gamma
+p02 <- gamma_enriched_df |> 
+  filter(Topic >= 0 & Topic <= 9) |>
+  mutate(Topic = factor(Topic)) |> 
+  group_by(genre, date) |> 
+  # normalize probabilities
+  mutate(Probability = Probability / sum(Probability)) %>%
+  group_by(date, Topic) |> 
+  # summarise(Probability = max(Probability)) |> 
+  ggplot(aes(Probability, Topic, fill = Topic)) +
+  # geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  geom_col(alpha = 0.7) +
+  facet_wrap(~ genre + date, scales = "free_y") +
+  labs(x = expression(Probability),
+       title = "Topic Probabilities by year") +
+  theme(legend.position = "none")
+p02
+# ggsave("pics/topics_unos_by_subject.png", dpi = 300, width = 10, height = 10)
+
+```
+
+
+```{r}
+plotly <- import("plotly")
+np <- import("numpy")
+
+# Visualize topics
+fig <- topic_model$visualize_barchart(custom_labels=FALSE)
+
+# # Render the plot using plotly
+# plotly$offline$iplot(fig)
+
+# Save the figure as an HTML file
+plotly$offline$plot(fig, filename = "wm_topics_topwords_interactive.html", 
+                    auto_open = TRUE)
+
+library(htmltools)
+library(htmlwidgets)
+# Read the HTML file content as a single string
+html_content <- read_file(
+  "wm_topics_topwords_interactive.html")
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+```{r}
+# topic_model.visualize_topics_over_time(topics_over_time, top_n_topics=20)
+# timestamps <- as.integer(dataset$year)
+# topics_over_time  <- topic_model$topics_over_time(texts_cleaned, timestamps, nr_bins=20L, global_tuning=TRUE, evolution_tuning=TRUE)
+
+plotly <- import("plotly")
+np <- import("numpy")
+
+# Visualize topics
+fig <- topic_model$visualize_topics_over_time(topics_over_time, top_n_topics=20L)
+
+# # Render the plot using plotly
+# plotly$offline$iplot(fig)
+
+# Save the figure as an HTML file
+plotly$offline$plot(fig, filename = "wm_topics_over_time_interactive.html", 
+                    auto_open = TRUE)
+
+library(htmltools)
+library(htmlwidgets)
+# Read the HTML file content as a single string
+html_content <- read_file(
+  "wm_topics_over_time_interactive.html")
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+```{r}
+# topic_model.visualize_topics_over_time(topics_over_time, topics=[9, 10, 72, 83, 87, 91])
+# timestamps <- as.integer(dataset$year)
+# topics_over_time  <- topic_model$topics_over_time(texts_cleaned, timestamps, nr_bins=20L, global_tuning=TRUE, evolution_tuning=TRUE)
+
+plotly <- import("plotly")
+np <- import("numpy")
+
+# Visualize topics
+fig <- topic_model$visualize_topics_over_time(topics_over_time, topics=c(0, 1, 2, 3, 4, 5))
+
+# # Render the plot using plotly
+# plotly$offline$iplot(fig)
+
+# Save the figure as an HTML file
+plotly$offline$plot(fig, filename = "wm_topics_over_time_select_interactive.html", 
+                    auto_open = TRUE)
+
+library(htmltools)
+library(htmlwidgets)
+# Read the HTML file content as a single string
+html_content <- read_file(
+  "wm_topics_over_time_select_interactive.html")
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+
+```
+
+
+```{r}
+#| eval: false
+
+plotly <- import("plotly")
+np <- import("numpy")
+
+fit = umap$UMAP(n_neighbors=3, n_components=3, min_dist=0.05)
+u = fit$fit_transform(embeddings)
+
+clusterer = hdbscan$HDBSCAN()
+clusterer$fit(u)
+
+fig <- clusterer$condensed_tree_$plot(select_clusters=TRUE)
+
+# Save the figure as an HTML file
+plotly$offline$plot(fig, filename = "wm_condensed_tree_plot_interactive.html", 
+                    auto_open = TRUE)
+
+library(htmltools)
+library(htmlwidgets)
+# Read the HTML file content as a single string
+html_content <- read_file(
+  "wm_condensed_tree_plot_interactive.html")
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+Which documents have more / a higher share of topics that are connected with environmental issues and climate change?
+
+
+## Topic prob distribution
+
+Modify the visualization and saving steps to include the additional context.
+
+```{r}
+plotly <- import("plotly")
+
+# Example of visualizing topic distribution for a specific document
+abstract_id <- 208
+topic_distr <- as.numeric(probs[abstract_id, ])
+topic_distr_np <- np$array(topic_distr)
+
+# Visualize the topic-document distribution for the specified document
+fig <- topic_model$visualize_distribution(topic_distr_np, min_probability = 0.0)
+# plotly$offline$iplot(fig)
+plotly$offline$plot(fig, filename = "wm_topic_dist_interactive.html", auto_open = TRUE)
+
+# Display the saved HTML file content in the Quarto notebook
+html_content <- read_file("wm_topic_dist_interactive.html")
+browsable(HTML(html_content))
+```
+
+
+```{r}
+head(probs[abstract_id, ])
+
+```
+
+
+## Visualize topics
+
+```{r}
+# Visualize topics
+fig <- topic_model$visualize_topics(custom_labels=FALSE)
+
+# Extract the necessary data from the figure object directly
+fig_dict <- fig$to_plotly_json()
+
+# Extract the 'customdata' from the JSON structure
+customdata <- fig_dict$data[[1]]$customdata
+
+# Convert to dataframe
+df <- as.data.frame(customdata, columns = c('Topic', 'Tokens', 'Size'))
+
+unnested_df <- df |> 
+  unnest(cols = V1, keep_empty = TRUE) |> 
+  unnest(cols = V2, keep_empty = TRUE) |> 
+  unnest(cols = V3, keep_empty = TRUE) |> 
+  distinct()
+
+colnames(unnested_df) <- c('Topic', 'Tokens', 'Size')
+
+# Print the unnested topic information data frame
+unnested_df |> 
+  head(10)
+
+# Convert types if necessary
+unnested_df <- unnested_df %>%
+  mutate(
+    Topic = as.numeric(Topic),
+    Tokens = as.character(Tokens),
+    Size = as.integer(Size)
+  )
+
+pic <- unnested_df |> 
+  slice_max(Size, n = 30) |> 
+  ggplot(aes(x = reorder(Tokens, -Size), y = Size)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Topic Sizes", x = "Tokens", y = "Size")
+# ggsave("pics/spiegel_topics_keywords.png", plot = pic, dpi = 300, width = 10, height = 10)
+plotly::ggplotly(pic)
+```
+
+
+```{r}
+# Import the Python version of plotly for visualization
+# BERTopic visualize method relies on that
+plotly <- import("plotly")
+np <- import("numpy")
+
+# Visualize topics
+fig <- topic_model$visualize_topics(custom_labels=FALSE)
+
+# # Render the plot using plotly
+# plotly$offline$iplot(fig)
+
+# Save the figure as an HTML file
+plotly$offline$plot(fig, filename = "wm_topics_size_interactive_2.html", 
+                    auto_open = TRUE)
+
+library(htmltools)
+library(htmlwidgets)
+# Read the HTML file content as a single string
+html_content <- read_file(
+  "wm_topics_size_interactive_2.html")
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+**Inspect Top Words of Overlapping Topics**: Identify and compare the top keywords for the topics that overlap on the map. Use `BERTopic`'s `get_topic` function:
+
+```{python}
+#| eval: false
+
+# Assuming topic_model is your BERTopic model
+topic_keywords_1 = topic_model.get_topic(1)  # Replace 1 with your topic number
+topic_keywords_2 = topic_model.get_topic(2)  # Replace 2 with another topic number
+print(topic_keywords_1)
+print(topic_keywords_2)
+```
+
+**Evaluate Documents**: Analyze the documents assigned to overlapping topics:
+
+```{python}
+#| eval: false
+
+# Get representative documents for a topic
+docs_topic_1 = topic_model.get_representative_docs(1)
+docs_topic_2 = topic_model.get_representative_docs(2)
+```
+
+
+```{r}
+#| eval: false
+
+names(unnested_topic_info_df)
+names(unnested_df)
+names(results_extended)
+```
+
+```{r}
+#| eval: false
+
+# python: 
+# topic_keywords_0 = topic_model.get_topic(0)
+# print("Topic 0 Keywords:", topic_keywords_0)
+
+results_extended |> 
+  filter(Topic %in% c(0, 4, 11)) |> 
+  select(Topic, title, OpenAI, Representation, Text) |> 
+  distinct(Topic, Text, .keep_all = TRUE)
+```
+
+
+```{r}
+#| eval: false
+
+# input_file <- "spiegel_poldeu2.csv"
+input_file <- "spiegel_thema_meinung_2022-12-25_genre.csv"
+input_folder <- "C:/Users/teodo/Documents/R/Words_Music/data"
+output_folder <- "C:/Users/teodo/Documents/R/Words_Music/data"
+input_df <- read_csv(file.path(input_folder, input_file))
+input_df |> 
+  filter(title == "Wie wär’s stattdessen mit einem Staat, der funktioniert?") |> 
+  select(text) |> 
+  unnest_tokens(word, text) |> 
+  count(word, sort = T)
+```
+
+
+## Hierarchy of topics
+
+```{r}
+# Hierarchical topics
+# linkage_function = lambda x: sch.linkage(x, 'single', optimal_ordering=True)
+hierarchical_topics  <- topic_model$hierarchical_topics(texts_cleaned) # , linkage_function = linkage_function)
+
+tree <- topic_model$get_topic_tree(hierarchical_topics)
+# print(tree)
+```
+
+
+```{r}
+# topic_model.visualize_hierarchy(custom_labels=True)
+
+# Generate the hierarchical clustering visualization
+fig_hierarchy <- topic_model$visualize_hierarchy(custom_labels = FALSE)
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_hierarchy, filename = "wm_hierarchy_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_hierarchy_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+```{r}
+# hierarchical_topics = topic_model.hierarchical_topics(documents)
+# topic_model.visualize_hierarchy(hierarchical_topics=hierarchical_topics)
+
+hierarchical_topics = topic_model$hierarchical_topics(texts_cleaned)
+
+# Generate the hierarchical clustering visualization
+fig_hierarchical_topics <- topic_model$visualize_hierarchy(hierarchical_topics=hierarchical_topics, 
+                                                           custom_labels = FALSE)
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_hierarchical_topics, filename = "wm_hierarchical_topics_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_hierarchical_topics_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+```
+
+
+## Merge topics
+
+Have a look at the dendrogram before merging.
+
+Here merging has been disabled. 
+
+```{r}
+#| eval: false
+
+topics_to_merge <- list(54L, 67L, 20L)
+topic_model$merge_topics(texts_cleaned, topics_to_merge)
+
+```
+
+list of lists format when more than one group for merging.
+
+```{r}
+#| eval: false
+
+topics_to_merge <- list(list(54L, 67L, 20L),
+                        list(101L,53L, 31L, 95L))
+topic_model$merge_topics(texts_cleaned, topics_to_merge)
+
+```
+
+
+```{r}
+# Generate the hierarchical clustering visualization
+fig_hierarchy <- topic_model$visualize_hierarchy(custom_labels = FALSE)
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_hierarchy, filename = "wm_hierarchy_merged_topics_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_hierarchy_merged_topics_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+## Groups & Classes
+
+You can click on topics under the legend "Global Topic Representations) to the right to select or de-select topics to be included in the bar diagram. Hover over the bars to see the words the different parties were more likely to use for a given topic.
+
+```{r}
+# Python:
+# classes = df["party"].tolist() # Party affiliation of authors
+# topics_per_class = topic_model.topics_per_class(documents, classes=classes)
+# topic_model.visualize_topics_per_class(topics_per_class, topics=list(range(0, 10)))
+
+classes = as.list(dataset$genre) # text types
+topics_per_class = topic_model$topics_per_class(texts_cleaned, classes=classes)
+# Visualize topics per class
+fig_classes <- topic_model$visualize_topics_per_class(topics_per_class, topics = py$list(py$range(0L, 10L)))
+
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_classes, filename = "wm_classes_topics_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_classes_topics_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+```{r}
+classes <- as.list(dataset$author)
+# Calculate topics per class using the BERTopic model
+topics_per_class = topic_model$topics_per_class(texts_cleaned, classes=classes)
+# Visualize topics per class
+fig_classes <- topic_model$visualize_topics_per_class(topics_per_class, topics = py$list(py$range(0L, 10L)))
+
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_classes, filename = "wm_classes_authors_topics_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_classes_authors_topics_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+
+```
+
+
+## Visualize documents
+
+```{r}
+# Reduce dimensionality of embeddings using UMAP
+reduced_embeddings <- umap$UMAP(n_neighbors = 10L, n_components = 2L, min_dist = 0.0, metric = 'cosine')$fit_transform(embeddings)
+
+# Generate the document visualization
+fig_documents <- topic_model$visualize_documents(texts_cleaned, reduced_embeddings = reduced_embeddings, custom_labels = TRUE, hide_annotations=TRUE)
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_documents, filename = "wm_documents_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_documents_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+```
+
+
+```{r}
+# # Reduce dimensionality of embeddings using UMAP
+# reduced_embeddings <- umap$UMAP(n_neighbors = 10L, n_components = 2L, min_dist = 0.0, metric = 'cosine')$fit_transform(embeddings)
+
+# Generate the document visualization
+fig_documents <- topic_model$visualize_documents(texts_cleaned, reduced_embeddings = embeddings, custom_labels = TRUE, hide_annotations=TRUE)
+
+# Save the figure as an HTML file in Python
+plotly$offline$plot(fig_documents, filename = "wm_documents_full_interactive.html", auto_open = TRUE)
+
+# Read the HTML file content as a single string
+html_content <- read_file("wm_documents_full_interactive.html")
+
+# Custom JavaScript to modify the click behavior
+custom_js <- '
+<script type="text/javascript">
+document.addEventListener("DOMContentLoaded", function() {
+    var plot = document.getElementById("plotly-graph-div");
+
+    plot.on("plotly_click", function(data) {
+        var clickedTopic = data.points[0].curveNumber;
+        
+        var update = {
+            visible: Array(plot.data.length).fill(false)
+        };
+        
+        update.visible[clickedTopic] = true;
+        
+        Plotly.restyle(plot, update);
+    });
+});
+</script>
+'
+
+# Insert the custom JavaScript before the closing </body> tag
+html_content <- sub("</body>", paste(custom_js, "</body>"), html_content)
+
+# Write the modified HTML content back to the file
+write_file(html_content, "wm_documents_full_interactive.html")
+
+# Display the saved HTML file content in the Quarto notebook
+browsable(HTML(html_content))
+```
+
+
+## Save and Load the Model
+
+Ensure to save and reload the model while maintaining the additional context.
+
+```{r}
+#| eval: false
+
+# Save the model
+topic_model$save("topic_model_bertopic")
+
+# Load the model
+loaded_model <- BERTopic$load("topic_model_bertopic")
+
+# Verify loaded model
+loaded_fit_transform <- loaded_model$fit_transform(texts_cleaned, embeddings)
+loaded_topics <- loaded_fit_transform[[1]]
+loaded_probs <- loaded_fit_transform[[2]]
+
+# Combine results with additional columns
+loaded_results <- data.frame(
+  School = dataset$School,
+  Doc_ID = dataset$Doc_ID,
+  Chapter_Index = dataset$Chapter_Index,
+  Book_Index = dataset$Book_Index,
+  Sentence_ID = dataset$Sentence_ID,
+  text_clean = texts_cleaned,
+  Text = dataset$Text,
+  Text_Short = dataset$Text_Short,
+  Text_Length = dataset$text_length,
+  Environmental_Phrases.x = dataset$Environmental_Phrases.x,
+  Environmental_Phrases.y = dataset$Environmental_Phrases.y,
+  Environmental_Phrases = dataset$Environmental_Phrases,
+  Query = dataset$Query,
+  Score = dataset$Score,
+  Topic = loaded_topics,
+  Probability = apply(loaded_probs, 1, max)
+)
+
+head(loaded_results)
+```
+
+This script ensures that the additional columns (`School`, `Doc_ID`, `Chapter_Index`, `Book_Index`, `Sentence_ID`) are included in the resulting dataframes and visualizations, providing full context for each topic identified. Adjust the script as necessary to suit your specific needs and data structure.
+
+
+## Outlier reduction
+
+### Default
+
+```{r}
+#| eval: true
+
+# Reduce outliers
+new_topics = topic_model$reduce_outliers(texts_cleaned, topics)
+```
+
+
+### Probabilites
+
+```{r}
+#| eval: false
+
+# Reduce outliers using the `probabilities` strategy
+new_topics = topic_model$reduce_outliers(texts_cleaned, topics, probabilities=probs, 
+                             threshold=0.05, strategy="probabilities")
+```
+
+
+### c-TF-IDF
+
+```{r}
+#| eval: false
+
+# Use the "c-TF-IDF" strategy with a threshold
+new_topics = topic_model$reduce_outliers(texts_cleaned, topics , strategy="c-tf-idf", threshold=0.1)
+
+```
+
+
+### Distributions
+
+```{r}
+#| eval: false
+
+# Reduce all outliers that are left with the "distributions" strategy
+new_topics = topic_model$reduce_outliers(texts_cleaned, topics, strategy="distributions")
+
+```
+
+
+### Embeddings
+
+```{r}
+#| eval: false
+
+# Reduce outliers with pre-calculate embeddings instead
+new_topics = topic_model$reduce_outliers(texts_cleaned, topics, strategy="embeddings", embeddings=embeddings)
+
+```
+
+
+### Chain Strategies
+
+```{r}
+#| eval: false
+
+# Reduce outliers with pre-calculate embeddings instead
+new_topics = topic_model$reduce_outliers(texts_cleaned, topics, strategy="embeddings", embeddings=embeddings)
+
+# Use the "c-TF-IDF" strategy with a threshold
+new_topics = topic_model$reduce_outliers(texts_cleaned, new_topics , strategy="c-tf-idf", threshold=0.1)
+
+# Reduce outliers using the `probabilities` strategy
+new_topics = topic_model$reduce_outliers(texts_cleaned, new_topics, probabilities=probs, strategy="probabilities")
+
+# Reduce all outliers that are left with the "distributions" strategy
+new_topics = topic_model$reduce_outliers(texts_cleaned, new_topics, strategy="distributions")
+
+```
+
+## Update topics
+
+```{r}
+topic_model$update_topics(texts_cleaned, topics=new_topics)
+```
+
+
+```{r}
+#| eval: false
+
+# Store the updated model in a new variable
+updated_topic_model <- topic_model$update_topics(texts_cleaned, topics=new_topics)
+
+# Check if the new model is valid
+if (!is.null(updated_topic_model)) {
+  topic_model <- updated_topic_model
+} else {
+  print("Updating topics failed. The model is NULL.")
+}
+
+```
+
+
+## Test representation models
+
+```{r}
+#| eval: false
+
+# Test re-initializing individual models before full update
+keybert_model <- bertopic$representation$KeyBERTInspired()
+pos_model <- bertopic$representation$PartOfSpeech("sl_core_news_lg")
+mmr_model <- bertopic$representation$MaximalMarginalRelevance(diversity = 0.3)
+openai_model <- bertopic$representation$OpenAI(client, model = "llama3.1:8b-instruct-fp16", exponential_backoff = TRUE, chat = TRUE, prompt = prompt)
+
+# Ensure each model is correctly initialized
+str(keybert_model)
+str(pos_model)
+str(mmr_model)
+str(openai_model)
+
+```
+
+## Re-run model training
+
+```{r}
+#| eval: false
+
+# Rebuild the topic model with the same settings
+topic_model <- BERTopic(
+  embedding_model = embedding_model,
+  umap_model = umap_model,
+  hdbscan_model = hdbscan_model,
+  vectorizer_model = vectorizer_model,
+  representation_model = representation_model,
+  calculate_probabilities = TRUE,
+  top_n_words = 10L,
+  verbose = TRUE
+)
+
+tictoc::tic()
+
+# Fit the model and transform the texts
+fit_transform <- topic_model$fit_transform(texts_cleaned, embeddings)
+topics <- fit_transform[[1]]
+probs <- fit_transform[[2]]
+
+tictoc::toc()
+
+# Combine results with additional columns
+results <- data.frame(
+  School = dataset$School,
+  Doc_ID = dataset$Doc_ID,
+  Chapter_Index = dataset$Chapter_Index,
+  Book_Index = dataset$Book_Index,
+  Sentence_ID = dataset$Sentence_ID,
+  text_clean = texts_cleaned,
+  Text = dataset$Text,
+  Text_Short = dataset$Text_Short,
+  Text_Length = dataset$text_length,
+  Environmental_Phrases.x = dataset$Environmental_Phrases.x,
+  Environmental_Phrases.y = dataset$Environmental_Phrases.y,
+  Environmental_Phrases = dataset$Environmental_Phrases,
+  Query = dataset$Query,
+  Score = dataset$Score,
+  Topic = topics,
+  Probability = apply(probs, 1, max)  # Assuming the highest probability for each sentence
+)
+
+results <- results |> 
+  mutate(row_id = row_number()) |> 
+  select(row_id, everything())
+
+head(results)
+```
+
+
+## Hyperparameter Tuning
+
+Although BERTopic works quite well out of the box, there are a number of hyperparameters to tune according to your use case. This section will focus on important parameters directly accessible in BERTopic but also hyperparameter optimization in sub-models such as HDBSCAN and UMAP.
+
+### BERTopic
+
+When instantiating BERTopic, there are several hyperparameters that you can directly adjust that could significantly improve the performance of your topic model. In this section, we will go through the most impactful parameters in BERTopic and directions on how to optimize them.
+
+#### language
+
+The language parameter is used to simplify the selection of models for those who are not familiar with sentence-transformers models.
+
+In essence, there are two options to choose from:
+
+    language = "english" or
+    language = "multilingual"
+
+The English model is "all-MiniLM-L6-v2" and can be found here. It is the default model that is used in BERTopic and works great for English documents.
+
+The multilingual model is "paraphrase-multilingual-MiniLM-L12-v2" and supports over 50+ languages which can be found here. The model is very similar to the base model but is trained on many languages and has a slightly different architecture.
+
+#### top_n_words
+
+top_n_words refers to the number of words per topic that you want to be extracted. In practice, I would advise you to keep this value below 30 and preferably between 10 and 20. The reasoning for this is that the more words you put in a topic the less coherent it can become. The top words are the most representative of the topic and should be focused on.
+
+#### n_gram_range
+
+The n_gram_range parameter refers to the CountVectorizer used when creating the topic representation. It relates to the number of words you want in your topic representation. For example, "New" and "York" are two separate words but are often used as "New York" which represents an n-gram of 2. Thus, the n_gram_range should be set to (1, 2) if you want "New York" in your topic representation.
+
+#### min_topic_size
+
+min_topic_size is an important parameter! It is used to specify what the minimum size of a topic can be. The lower this value the more topics are created. If you set this value too high, then it is possible that simply no topics will be created! Set this value too low and you will get many microclusters.
+
+It is advised to play around with this value depending on the size of your dataset. If it nears a million documents, then it is advised to set it much higher than the default of 10, for example, 100 or even 500.
+
+#### nr_topics
+
+nr_topics can be a tricky parameter. It specifies, after training the topic model, the number of topics that will be reduced. For example, if your topic model results in 100 topics but you have set nr_topics to 20 then the topic model will try to reduce the number of topics from 100 to 20.
+
+This reduction can take a while as each reduction in topics activates a c-TF-IDF calculation. If this is set to None, no reduction is applied. Use "auto" to automatically reduce topics using HDBSCAN.
+
+#### low_memory
+
+low_memory sets UMAP's low_memory to True to make sure that less memory is used in the computation. This slows down computation but allows UMAP to be run on low-memory machines.
+
+#### calculate_probabilities
+
+calculate_probabilities lets you calculate the probabilities of each topic in each document. This is computationally quite expensive and is turned off by default.
+
+
+### UMAP
+
+UMAP is an amazing technique for dimensionality reduction. In BERTopic, it is used to reduce the dimensionality of document embedding into something easier to use with HDBSCAN to create good clusters.
+
+However, it does has a significant number of parameters you could take into account. As exposing all parameters in BERTopic would be difficult to manage, we can instantiate our UMAP model and pass it to BERTopic:
+
+from umap import UMAP
+
+umap_model = UMAP(n_neighbors=15, n_components=10, metric='cosine', low_memory=False)
+topic_model = BERTopic(umap_model=umap_model).fit(docs)
+
+#### n_neighbors
+
+n_neighbors is the number of neighboring sample points used when making the manifold approximation. Increasing this value typically results in a more global view of the embedding structure whilst smaller values result in a more local view. Increasing this value often results in larger clusters being created.
+
+#### n_components
+
+n_components refers to the dimensionality of the embeddings after reducing them. This is set as a default to 5 to reduce dimensionality as much as possible whilst trying to maximize the information kept in the resulting embeddings. Although lowering or increasing this value influences the quality of embeddings, its effect is largest on the performance of HDBSCAN. Increasing this value too much and HDBSCAN will have a hard time clustering the high-dimensional embeddings. Lower this value too much and too little information in the resulting embeddings are available to create proper clusters. If you want to increase this value, I would advise setting using a metric for HDBSCAN that works well in high dimensional data.
+
+#### metric
+
+metric refers to the method used to compute the distances in high dimensional space. The default is cosine as we are dealing with high dimensional data. However, BERTopic is also able to use any input, even regular tabular data, to cluster the documents. Thus, you might want to change the metric to something that fits your use case.
+
+#### ow_memory
+
+low_memory is used when datasets may consume a lot of memory. Using millions of documents can lead to memory issues and setting this value to True might alleviate some of the issues.
+
+
+### HDBSCAN
+
+After reducing the embeddings with UMAP, we use HDBSCAN to cluster our documents into clusters of similar documents. Similar to UMAP, HDBSCAN has many parameters that could be tweaked to improve the cluster's quality.
+
+from hdbscan import HDBSCAN
+
+hdbscan_model = HDBSCAN(min_cluster_size=10, metric='euclidean', prediction_data=True)
+topic_model = BERTopic(hdbscan_model=hdbscan_model).fit(docs)
+
+#### min_cluster_size
+
+min_cluster_size is arguably the most important parameter in HDBSCAN. It controls the minimum size of a cluster and thereby the number of clusters that will be generated. It is set to 10 as a default. Increasing this value results in fewer clusters but of larger size whereas decreasing this value results in more micro clusters being generated. Typically, I would advise increasing this value rather than decreasing it.
+
+#### min_samples
+
+min_samples is automatically set to min_cluster_size and controls the number of outliers generated. Setting this value significantly lower than min_cluster_size might help you reduce the amount of noise you will get. Do note that outliers are to be expected and forcing the output to have no outliers may not properly represent the data.
+
+#### metric
+
+metric, like with HDBSCAN is used to calculate the distances. Here, we went with euclidean as, after reducing the dimensionality, we have low dimensional data and not much optimization is necessary. However, if you increase n_components in UMAP, then it would be advised to look into metrics that work with high dimensional data.
+
+#### prediction_data
+
+Make sure you always set this value to True as it is needed to predict new points later on. You can set this to False if you do not wish to predict any unseen data points. 
+
+
+In the current pipeline, the removal of Slovenian stopwords primarily occurs during the `CountVectorizer` step. Let’s break down the role of each component in our pipeline and clarify where stopwords are handled:
+
+### 1. **Sentence Embeddings (SentenceTransformer)**
+   - **Stopword Handling**: The embeddings generated by `SentenceTransformer` include Slovenian stopwords. As mentioned earlier, this is generally beneficial because it preserves the context and meaning of the sentences.
+   - **Impact**: The inclusion of stopwords in embeddings helps maintain semantic richness. Since these embeddings are the foundation for the UMAP and HDBSCAN models, they contribute directly to the quality of the topic representations.
+
+### 2. **UMAP (Uniform Manifold Approximation and Projection)**
+   - **Stopword Handling**: UMAP operates on the dense sentence embeddings generated by `SentenceTransformer`. UMAP itself does not specifically remove stopwords because it processes the embeddings rather than raw text.
+   - **Impact**: UMAP reduces the dimensionality of the embeddings while preserving their global and local structure. Since the embeddings already include stopwords, UMAP's focus is on maintaining the relative positions of sentences based on their semantic content.
+
+### 3. **HDBSCAN (Hierarchical Density-Based Spatial Clustering of Applications with Noise)**
+   - **Stopword Handling**: Similar to UMAP, HDBSCAN works on the reduced-dimensionality embeddings provided by UMAP. It does not deal directly with stopwords, as it clusters these embeddings.
+   - **Impact**: HDBSCAN clusters the reduced embeddings to identify topics. The inclusion of stopwords in the embeddings means that the clustering process benefits from the complete semantic context of the sentences.
+
+### 4. **CountVectorizer (for c-TF-IDF)**
+   - **Stopword Handling**: This is the step where stopwords are explicitly removed. The `CountVectorizer` processes the raw text data to create a term-frequency matrix, excluding the specified Slovenian stopwords (and additional stopwords like 'http', 'https', 'amp', 'com').
+   - **Impact**: Removing stopwords during this step refines the topic words by focusing on more meaningful terms, which improves the interpretability of the topics identified by `BERTopic`.
+
+### 5. **KeyBERT Model**
+   - **Stopword Handling**: The KeyBERT model refines topic representations by extracting keywords from the most relevant documents within each topic. While KeyBERT itself might use various techniques for keyword extraction (e.g., leveraging embeddings, using TF-IDF, etc.), it typically does not involve explicit stopword removal unless specified in its configuration.
+   - **Impact**: KeyBERT may indirectly benefit from the previous stopword removal (during the vectorization step) when determining the most representative words for each topic.
+
+### 6. **MMR (Maximal Marginal Relevance) Model**
+   - **Stopword Handling**: The MMR model optimizes diversity in the selected keywords by balancing relevance and novelty. Like KeyBERT, MMR does not directly remove stopwords but benefits from the refined keywords already processed by the `CountVectorizer`.
+   - **Impact**: MMR enhances the representation of topics by ensuring a diverse set of keywords, making the topics more comprehensive and less redundant.
+
+### 7. **POS (Part-of-Speech) Model**
+   - **Stopword Handling**: The POS model focuses on identifying and using specific parts of speech (like nouns or verbs) for topic refinement. It does not inherently remove stopwords, but the quality of the embeddings or the keywords (where stopwords have already been removed) can influence its performance.
+   - **Impact**: The POS model adds linguistic structure to the topic representation, ensuring that the topics are not just a collection of random words but meaningful phrases or terms.
+
+### Summary
+- **Stopword Removal**: Stopwords are explicitly removed only during the `CountVectorizer` step in your pipeline. This ensures that the topic words identified by `BERTopic` are meaningful and relevant.
+  
+- **Other Models**: The UMAP, HDBSCAN, KeyBERT, MMR, and POS models do not directly remove stopwords but work on data that has been processed to include or exclude stopwords as appropriate. These models benefit from the full context provided by embeddings that include stopwords and the refined keywords or topic words that have stopwords removed during vectorization.
+
+### Efficiency in Refining Topics
+
+- **UMAP**: Efficiently reduces dimensionality, preserving the semantic structure of the data.
+- **HDBSCAN**: Clusters the data effectively, identifying dense regions that correspond to topics.
+- **KeyBERT**: Extracts and refines topic keywords, enhancing the interpretability of topics.
+- **MMR**: Ensures diversity in topic keywords, preventing redundancy.
+- **POS**: Adds linguistic structure to topics, making them more syntactically and semantically coherent.
+
+In conclusion, stopwords are handled mainly in the `CountVectorizer` step, while the other models rely on the context-rich embeddings or processed keywords to refine and define topics efficiently.
+
+
+## Intertopic Distance Map
+
+The **Intertopic Distance Map** provided by `BERTopic` is a visualization that helps you understand the relationships between topics. It's a critical tool for interpreting how topics relate to one another in the latent space. However, it can sometimes be confusing, especially if thematically different topics appear to overlap significantly. Let's break down how this map works and why certain topics may overlap even if they seem dramatically different.
+
+### Understanding the Intertopic Distance Map
+
+1. **What the Map Represents**:
+   - The Intertopic Distance Map is usually generated using **t-SNE** (t-distributed Stochastic Neighbor Embedding) or **UMAP** (Uniform Manifold Approximation and Projection). Both are dimensionality reduction techniques used to visualize high-dimensional data in a two-dimensional space.
+   - Each point on the map represents a topic. The position of these points is determined by the similarity of the topics in the high-dimensional space.
+   - Topics that are closer together on the map are more similar in terms of their word distributions, while those farther apart are less similar.
+
+2. **Axes and Scale**:
+   - The axes in these maps do not correspond to specific dimensions or features; they are abstract representations of relationships. Therefore, the specific x and y coordinates are not inherently meaningful but are instead used to show relative distances.
+   - The map is not a precise metric space, so overlap in the 2D map does not always mean identical content but rather some degree of similarity in word usage.
+
+3. **Overlap of Dramatically Different Topics**:
+   - The overlap could occur due to several reasons:
+     - **Common Vocabulary**: Even dramatically different topics might share common vocabulary or stopwords, leading to some overlap in the latent space.
+     - **General vs. Specific Topics**: A more general topic (like "politics") might overlap with more specific ones ("elections", "political scandals") because it encompasses a broader range of words that overlap with specific topics.
+     - **Dimensionality Reduction Artifact**: t-SNE and UMAP sometimes distort distances to preserve local structure. This means some overlap might be more of an artifact of how these algorithms balance global and local relationships rather than actual similarity.
+     - **Word Co-occurrence**: In newspaper articles, certain words might frequently co-occur across different contexts (e.g., common phrases, reporting styles), making topics appear closer together even if they are semantically different.
+
+### How to Interpret Overlapping Topics
+
+1. **Check Topic Words**: Look at the top words for each topic. If different topics share several high-frequency words, this can explain the overlap. Understanding these common terms can provide insight into why topics are close on the map.
+
+2. **Explore Documents**: Identify which documents belong to overlapping topics. This can reveal if the overlap is due to specific documents being multi-themed or if the topics inherently share a context.
+
+3. **Use Topic Probabilities**: Look at the document-topic distribution. Documents with high probabilities for multiple topics can indicate where overlaps are occurring.
+
+4. **Consider Further Preprocessing**: If you find that common words (e.g., common nouns, verbs, or names) cause overlaps, consider additional preprocessing steps:
+   - Remove additional stopwords.
+   - Use more aggressive lemmatization or stemming.
+   - Exclude frequent but non-informative terms specific to your dataset.
+
+5. **Use Other Metrics**: Besides visualization, consider looking at **Topic Coherence Scores** to evaluate the semantic coherence of topics. Higher coherence scores indicate that the topic is more semantically interpretable.
+
+### Practical Steps to Analyze Overlaps
+
+1. **Inspect Top Words of Overlapping Topics**: Identify and compare the top keywords for the topics that overlap on the map. Use `BERTopic`'s `get_topic` function:
+
+   ```python
+   # Assuming topic_model is your BERTopic model
+   topic_keywords_1 = topic_model.get_topic(1)  # Replace 1 with your topic number
+   topic_keywords_2 = topic_model.get_topic(2)  # Replace 2 with another topic number
+   print(topic_keywords_1)
+   print(topic_keywords_2)
+   ```
+
+2. **Evaluate Documents**: Analyze the documents assigned to overlapping topics:
+
+   ```python
+   # Get representative documents for a topic
+   docs_topic_1 = topic_model.get_representative_docs(1)
+   docs_topic_2 = topic_model.get_representative_docs(2)
+   ```
+
+3. **Adjust Model Parameters**: Experiment with `BERTopic` parameters like `min_topic_size`, `nr_topics`, or the embedding model. This might help create more distinct topics.
+
+### Conclusion
+
+The Intertopic Distance Map is a powerful visualization tool, but understanding its limitations and how to interpret overlaps is essential. Overlaps can occur due to shared vocabulary, the nature of dimensionality reduction techniques, or inherent similarities in the topic structure. By investigating topic keywords, representative documents, and considering additional preprocessing, you can gain deeper insights into your topics and the reasons behind their relationships on the map.
