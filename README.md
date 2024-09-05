@@ -6,5 +6,5 @@ Topic modeling with the `Python` package `BERTopic` (https://github.com/MaartenG
 devtools::install_github("tpetric7/bertopicr")
 ```
 The bertopicr package assumes a `Python` virtual environment and necessary `Python` packages installed.
-Detailed instrucions of the `R` package: https://github.com/tpetric7/bertopicr
+Detailed instructions of the `R` package: https://github.com/tpetric7/bertopicr
 
