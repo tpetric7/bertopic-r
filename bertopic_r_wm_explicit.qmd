@@ -79,6 +79,7 @@ library(htmlwidgets)
 library(arrow)
 
 library(reticulate)
+# ~ Home, in cmd terminal insert: echo %USERPROFILE%
 use_python("~/anaconda3/envs/bertopic", required = TRUE)
 reticulate::py_config()
 reticulate::py_available()
