@@ -79,7 +79,7 @@ library(htmlwidgets)
 library(arrow)
 
 library(reticulate)
-use_python("c:/Users/teodo/anaconda3/envs/bertopic", required = TRUE)
+use_python("~/anaconda3/envs/bertopic", required = TRUE)
 reticulate::py_config()
 reticulate::py_available()
 
