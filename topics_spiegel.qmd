@@ -477,6 +477,17 @@ visualize_topics(model = topic_model,
 ```
 
 
+### Topic Similarity
+
+We can create a `similarity matrix` by applying cosine similarities through the generated topic embeddings. The resulting matrix indicates how similar topics are to each other. To visualize the similarity matrix we can use the `visualize_heatmap()` function. 
+
+```{r}
+visualize_heatmap(model = topic_model, 
+                  filename = "topics_similarity_heatmap", 
+                  auto_open = FALSE)
+```
+
+
 ### Topic hierarchy
 
 The best way to display the relatedness of documents (or text chunks) is the `visualize_hierarchy()` function, which creates an interactive `dendrogram`.
@@ -512,6 +523,23 @@ visualize_documents(model = topic_model,
                     reduced_embeddings = reduced_embeddings, 
                     filename = "visualize_documents", # default extension html
                     auto_open = FALSE) # TRUE enables output in browser
+```
+
+
+To create an interactive 3D plot, the `visualize_documents_3d()` function can be used.
+
+```{r}
+# Reduce dimensionality of embeddings using UMAP
+reduced_embeddings <- umap$UMAP(n_neighbors = 10L, n_components = 3L, min_dist = 0.0, metric = 'cosine')$fit_transform(embeddings)
+
+visualize_documents_3d(model = topic_model, 
+                       texts = texts_cleaned, 
+                       reduced_embeddings = reduced_embeddings, 
+                       custom_labels = FALSE, # default
+                       hide_annotation = TRUE, # default
+                       tooltips = c("Topic", "Name", "Probability", "Text"), # deault
+                       filename = "visualize_documents_3d", # default name
+                       auto_open = FALSE) # TRUE enables output in browser
 ```
 
 

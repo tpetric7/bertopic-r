@@ -1174,6 +1174,7 @@ unnested_doc_info_df1 <- unnested_doc_info_df1 |>
 #   writexl::write_xlsx("data/wm_doc_topics_01.xlsx")
 ```
 
+
 Below is a custom function to create a dataframe with unnested list columns. 
 The custom `get_document_info_df()` function looks like this:
 
@@ -1283,8 +1284,8 @@ unnested_doc_info_df1 <- unnested_doc_info_df1 |>
   mutate(seq_id = row_number())
 
 unnested_doc_info_df1 |> 
-  # filter(Topic == 0) |>
-  # distinct(Name, .keep_all = TRUE) |> 
+  filter(Topic == 0) |>
+  # distinct(Name, .keep_all = TRUE) |>
   head(3)
 
 ```
@@ -1294,7 +1295,7 @@ Now we can assess the results of each document (in our case: text chunk).
 
 ```{r}
 unnested_doc_info_df1 |> 
-  filter(Topic == 3 & Representative_document == TRUE)
+  filter(Topic == 0 & Representative_document == TRUE)
 ```
 
 
@@ -1516,11 +1517,9 @@ The representative documents of each topic are accessible like in the code chunk
 
 ```{r}
 unnested_doc_info_df1 |> 
-  group_by(Topic) |> 
   filter(Topic == 0) |> 
   filter(Representative_document == TRUE) |>
-  distinct(Representative_Docs) |>
-  unnest(Representative_Docs)
+  distinct(Representative_Docs)
 
 ```
 
@@ -2124,6 +2123,43 @@ source("functions/visualize_topics.R")
 visualize_topics(topic_model, "plot")
 
 ```
+
+
+### Topic Similarity
+
+```{r}
+visualize_heatmap <- function(model = topic_model, 
+                              filename = "topics_similarity_heatmap",
+                              auto_open = FALSE){
+  # Import the Python version of plotly for visualization
+  # BERTopic visualize method relies on that
+  plotly <- import("plotly")
+
+  # Visualize topics
+  fig <- topic_model$visualize_heatmap(custom_labels=FALSE)
+  
+  # Save the figure as an HTML file
+  plotly$offline$plot(fig, 
+                      filename = paste0(filename, ".html"), 
+                      auto_open = FALSE)
+  
+  library(htmltools)
+  library(htmlwidgets)
+  # Read the HTML file content as a single string
+  html_content <- read_file(paste0(filename, ".html"))
+  # Display the saved HTML file content in the Quarto notebook
+  browsable(HTML(html_content))
+  
+}
+
+# Example usage
+visualize_heatmap(model = topic_model, 
+                  filename = "plot", # custom filename
+                  auto_open = TRUE) # TRUE enables output in browser
+
+```
+
+
 
 
 ### Hierarchy of topics
