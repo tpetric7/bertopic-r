@@ -78,7 +78,8 @@ library(arrow)
 
 library(reticulate)
 # ~ Home, in cmd terminal insert: echo %USERPROFILE%
-use_python("~/anaconda3/envs/bertopic", required = TRUE)
+userprofile <- Sys.getenv("USERPROFILE")
+use_python(file.path(userprofile, "anaconda3/envs/bertopic"), required = TRUE)
 reticulate::py_config()
 reticulate::py_available()
 
@@ -162,7 +163,8 @@ datetime <- import("datetime")
 py <- import_builtins()
 sentence_transformers <- import("sentence_transformers")
 SentenceTransformer <- sentence_transformers$SentenceTransformer
-embedding_model = SentenceTransformer("BAAI/bge-m3")
+# embedding_model = SentenceTransformer("BAAI/bge-m3")
+embedding_model = SentenceTransformer("all-MiniLM-L12-v2")
 embeddings = embedding_model$encode(texts_cleaned, show_progress_bar=TRUE)
 
 ```
@@ -181,10 +183,10 @@ Other dimension reduction methods (like `PCA` or `tSNE`) can be used instead.
 
 ### Clustering
 
-The `hdbscan` module extracts clusters that can evaluated by the topic pipeline.
+The `hdbscan` module extracts clusters that can evaluated by the topic pipeline. With BERTopic version 0.17.0, I started to minimize the number of parallel workers using `core_dist_n_jobs` = 1 to avoid out of memory error messages on my `Windows` PC. 
 
 ```{r}
-hdbscan_model <- HDBSCAN(min_cluster_size=50L, min_samples = 20L, metric='euclidean', cluster_selection_method='eom', gen_min_span_tree=TRUE, prediction_data=TRUE)
+hdbscan_model <- HDBSCAN(min_cluster_size=50L, min_samples = 20L, metric='euclidean', cluster_selection_method='eom', gen_min_span_tree=TRUE, prediction_data=TRUE, core_dist_n_jobs = 1)
 
 ```
 
@@ -233,7 +235,8 @@ topic: <topic label>
 
 # download an appropriate local LLM for your computer with ollama/lm-studio
 openai_model <- bertopic$representation$OpenAI(client, 
-                                               model = "llama3.1:8b-instruct-fp16",
+                                               # model = "llama3.1:8b-instruct-fp16",
+                                               model = "qwen2.5:14b-instruct",
                                                exponential_backoff = TRUE, 
                                                chat = TRUE, 
                                                prompt = prompt)
@@ -523,7 +526,10 @@ visualize_documents(model = topic_model,
                     reduced_embeddings = reduced_embeddings, 
                     filename = "visualize_documents", # default extension html
                     auto_open = FALSE) # TRUE enables output in browser
+
 ```
+
+After updating to `BERTopic=0.17.0`, you might experience that the `visualize_documents()` function doesn't render the dots in the scatterplot. A simple **temporary fix** is to open the `Python` file `_documents.py` of the `visualize_documents()` function of` BERTopic` (on my `Windows` system it sits in `anaconda3\envs\bertopic\Lib\site-packages\bertopic\plotting\`) and change `go.Scattergl` to `go.Scatter` in the `fig.add_trace()` function (it occurs twice in the `Python` script).
 
 
 To create an interactive 3D plot, the `visualize_documents_3d()` function can be used.
@@ -537,7 +543,7 @@ visualize_documents_3d(model = topic_model,
                        reduced_embeddings = reduced_embeddings, 
                        custom_labels = FALSE, # default
                        hide_annotation = TRUE, # default
-                       tooltips = c("Topic", "Name", "Probability", "Text"), # deault
+                       tooltips = c("Topic", "Name", "Probability", "Text"), # default
                        filename = "visualize_documents_3d", # default name
                        auto_open = FALSE) # TRUE enables output in browser
 ```
