@@ -248,9 +248,9 @@ topic: <topic label>
 # download an appropriate local LLM for your computer with ollama/lm-studio
 # e.g., insert in your terminal 'ollama pull llama3.1'
 openai_model <- bertopic$representation$OpenAI(client, 
-                                               model = "qwen3",
+                                               # model = "qwen3",
                                                # model = "gemma3:4b",
-                                               # model = "qwen2.5:14b-instruct", 
+                                               model = "qwen2.5:14b-instruct",
                                                # model = "llama3.1:8b-instruct-fp16",
                                                exponential_backoff = TRUE, 
                                                chat = TRUE, 
