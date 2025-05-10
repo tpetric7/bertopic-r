@@ -85,8 +85,10 @@ library(arrow)
 
 # interface with Python
 library(reticulate)
+# ~ Home, in cmd terminal insert: echo %USERPROFILE%
+userprofile <- Sys.getenv("USERPROFILE")
+use_python(file.path(userprofile, "anaconda3/envs/bertopic"), required = TRUE)
 # use_python("path/to/your/python/env/bertopic", required = TRUE)
-use_python("~/anaconda3/envs/bertopic", required = TRUE)
 reticulate::py_config()
 reticulate::py_available()
 
@@ -196,7 +198,7 @@ Other dimension reduction methods (like `PCA` or `tSNE`) can be used instead.
 The `hdbscan` module extracts clusters that can evaluated by the topic pipeline.
 
 ```{r}
-hdbscan_model <- HDBSCAN(min_cluster_size=15L, min_samples = 10L, metric='euclidean', cluster_selection_method='eom', gen_min_span_tree=TRUE, prediction_data=TRUE)
+hdbscan_model <- HDBSCAN(min_cluster_size=15L, min_samples = 10L, metric='euclidean', cluster_selection_method='eom', gen_min_span_tree=TRUE, prediction_data=TRUE, core_dist_n_jobs = 1)
 
 ```
 
@@ -246,7 +248,9 @@ topic: <topic label>
 # download an appropriate local LLM for your computer with ollama/lm-studio
 # e.g., insert in your terminal 'ollama pull llama3.1'
 openai_model <- bertopic$representation$OpenAI(client, 
-                                               model = "llama3.1", 
+                                               model = "qwen3",
+                                               # model = "gemma3:4b",
+                                               # model = "qwen2.5:14b-instruct", 
                                                # model = "llama3.1:8b-instruct-fp16",
                                                exponential_backoff = TRUE, 
                                                chat = TRUE, 
